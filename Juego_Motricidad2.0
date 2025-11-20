@@ -1,0 +1,263 @@
+
+import cv2
+import mediapipe as mp
+import numpy as np
+import time
+from enum import Enum
+
+# Configuración del juego
+class Config:
+    ANCHO_VENTANA = 800
+    ALTO_VENTANA = 600
+    COLOR_FONDO = (255, 255, 255)
+    COLOR_PIEZA = (50, 150, 250)
+    COLOR_TEXTO = (0, 0, 0)
+    COLOR_FELICITACION = (0, 255, 0)
+    COLOR_FEEDBACK = (0, 0, 255)
+    FUENTE = cv2.FONT_HERSHEY_SIMPLEX
+
+class NivelDificultad(Enum):
+    FACIL = {"diametro": 80, "vueltas": 5, "velocidad": 0.05}
+    MEDIO = {"diametro": 60, "vueltas": 8, "velocidad": 0.1}
+    DIFICIL = {"diametro": 40, "vueltas": 12, "velocidad": 0.15}
+
+class JuegoDesenroscar:
+    def __init__(self):
+        self.cap = cv2.VideoCapture(0)
+        self.mp_manos = mp.solutions.hands
+        self.manos = self.mp_manos.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.5
+        )
+        self.mp_dibujo = mp.solutions.drawing_utils
+        self.nivel_actual = 0
+        self.puntuacion = 0
+        self.niveles = list(NivelDificultad)
+        self.iniciar_nivel()
+        self.ultimo_mensaje = ""
+        self.mostrar_mensaje_hasta = 0
+        self.x_muneca_anterior = 0
+        self.angulo_pinza_anterior = 0
+        self.calibrado = False
+        self.umbral_calibracion = 0
+
+    def iniciar_nivel(self):
+        if self.nivel_actual < len(self.niveles):
+            config = self.niveles[self.nivel_actual].value
+            self.diametro_pieza = config["diametro"]
+            self.vueltas_totales = config["vueltas"]
+            self.vueltas_restantes = self.vueltas_totales
+            self.velocidad_rotacion = config["velocidad"]
+            self.angulo_pieza = 0.0
+            self.angulo_inicial = 0.0
+            self.x_pieza = Config.ANCHO_VENTANA // 2
+            self.y_pieza = Config.ALTO_VENTANA // 2
+            self.longitud_rosca = self.diametro_pieza * 3
+            self.nivel_completado = False
+
+    def dibujar_pieza(self, img):
+        # Cuerpo de la pieza
+        largo_pieza = self.diametro_pieza * 3
+        cv2.rectangle(img, 
+                     (int(self.x_pieza - self.diametro_pieza / 2), 
+                      int(self.y_pieza - self.diametro_pieza / 2)),
+                     (int(self.x_pieza + self.diametro_pieza / 2), 
+                      int(self.y_pieza + largo_pieza - self.diametro_pieza / 2)),
+                     Config.COLOR_PIEZA, -1)
+
+        # Rosca (mejor representación)
+        num_lineas_rosca = 12
+        espaciado = largo_pieza / num_lineas_rosca
+        for i in range(num_lineas_rosca):
+            y_pos = self.y_pieza + i * espaciado - self.diametro_pieza/2
+            offset = np.sin(self.angulo_pieza + i * np.pi/3) * (self.diametro_pieza/3)
+            cv2.line(img, 
+                    (int(self.x_pieza - self.diametro_pieza/2 + offset), int(y_pos)),
+                    (int(self.x_pieza + self.diametro_pieza/2 + offset), int(y_pos)),
+                    (0, 0, 0), 2)
+
+        # Cabeza de la pieza (hexagonal para mejor realismo)
+        pts = []
+        for i in range(6):
+            ang = np.radians(i * 60) + self.angulo_pieza
+            pts.append((int(self.x_pieza + np.cos(ang) * self.diametro_pieza/2),
+                       int(self.y_pieza - self.diametro_pieza/2 + np.sin(ang) * self.diametro_pieza/2)))
+        cv2.fillPoly(img, [np.array(pts)], Config.COLOR_PIEZA)
+
+        # Contador de vueltas
+        cv2.putText(img, f"Vueltas: {self.vueltas_restantes}", 
+                    (self.x_pieza - 40, self.y_pieza - self.diametro_pieza),
+                    Config.FUENTE, 0.6, Config.COLOR_TEXTO, 2)
+
+    def calcular_vueltas_restantes(self):
+        diff_angulo = (self.angulo_pieza - self.angulo_inicial) % (2 * np.pi)
+        vueltas_completadas = diff_angulo / (2 * np.pi)
+        self.vueltas_restantes = max(0, self.vueltas_totales - int(vueltas_completadas))
+        return self.vueltas_restantes
+
+    def detectar_agarre_pinza(self, landmarks, frame_shape):
+        pulgar = landmarks.landmark[self.mp_manos.HandLandmark.THUMB_TIP]
+        indice = landmarks.landmark[self.mp_manos.HandLandmark.INDEX_FINGER_TIP]
+        
+        # Convertir a coordenadas de píxeles
+        h, w = frame_shape[:2]
+        pulgar_x, pulgar_y = int(pulgar.x * w), int(pulgar.y * h)
+        indice_x, indice_y = int(indice.x * w), int(indice.y * h)
+        
+        # Calcular distancia entre dedos
+        distancia = np.sqrt((pulgar_x - indice_x)**2 + (pulgar_y - indice_y)**2)
+        
+        # Calcular ángulo de la pinza
+        vector_x = indice_x - pulgar_x
+        vector_y = indice_y - pulgar_y
+        angulo_actual = np.arctan2(vector_y, vector_x)
+        
+        # Detectar cambio de ángulo para rotación
+        diff_angulo = (angulo_actual - self.angulo_pinza_anterior + np.pi) % (2 * np.pi) - np.pi
+        self.angulo_pinza_anterior = angulo_actual
+        
+        # Verificar si está cerca de la pieza
+        distancia_a_pieza = np.sqrt((self.x_pieza - (pulgar_x + indice_x)/2)**2 + 
+                                   (self.y_pieza - (pulgar_y + indice_y)/2)**2)
+        
+        return distancia < 0.1 * w and abs(diff_angulo) > 0.1 and distancia_a_pieza < self.diametro_pieza
+
+    def detectar_agarre_mano_completa(self, landmarks, frame_shape):
+        puntos_clave = [
+            self.mp_manos.HandLandmark.THUMB_TIP,
+            self.mp_manos.HandLandmark.INDEX_FINGER_TIP,
+            self.mp_manos.HandLandmark.MIDDLE_FINGER_TIP,
+            self.mp_manos.HandLandmark.RING_FINGER_TIP,
+            self.mp_manos.HandLandmark.PINKY_TIP
+        ]
+        
+        h, w = frame_shape[:2]
+        puntos = []
+        for punto in puntos_clave:
+            lm = landmarks.landmark[punto]
+            puntos.append((int(lm.x * w), int(lm.y * h)))
+        
+        # Calcular centro aproximado de la mano
+        centro_x = sum(p[0] for p in puntos) // len(puntos)
+        centro_y = sum(p[1] for p in puntos) // len(puntos)
+        
+        # Verificar proximidad a la pieza
+        distancia = np.sqrt((self.x_pieza - centro_x)**2 + (self.y_pieza - centro_y)**2)
+        
+        # Detectar movimiento de muñeca (pronación/supinación)
+        muneca = landmarks.landmark[self.mp_manos.HandLandmark.WRIST]
+        muneca_x = int(muneca.x * w)
+        diff_muneca = abs(muneca_x - self.x_muneca_anterior)
+        self.x_muneca_anterior = muneca_x
+        
+        return distancia < self.diametro_pieza * 1.2 and diff_muneca > 5
+
+    def mostrar_mensaje(self, img, mensaje, duracion=2):
+        self.ultimo_mensaje = mensaje
+        self.mostrar_mensaje_hasta = time.time() + duracion
+        texto_size = cv2.getTextSize(mensaje, Config.FUENTE, 1, 2)[0]
+        texto_x = (Config.ANCHO_VENTANA - texto_size[0]) // 2
+        cv2.putText(img, mensaje, (texto_x, Config.ALTO_VENTANA // 2), 
+                   Config.FUENTE, 1, Config.COLOR_FELICITACION, 2)
+
+    def mostrar_feedback_agarre(self, img, landmarks):
+        if landmarks:
+            # Dibujar círculo de feedback alrededor de los dedos
+            pulgar = landmarks.landmark[self.mp_manos.HandLandmark.THUMB_TIP]
+            indice = landmarks.landmark[self.mp_manos.HandLandmark.INDEX_FINGER_TIP]
+            h, w = img.shape[:2]
+            pulgar_x, pulgar_y = int(pulgar.x * w), int(pulgar.y * h)
+            indice_x, indice_y = int(indice.x * w), int(indice.y * h)
+            
+            # Dibujar línea entre pulgar e índice
+            cv2.line(img, (pulgar_x, pulgar_y), (indice_x, indice_y), 
+                    Config.COLOR_FEEDBACK, 2)
+            
+            # Dibujar círculos en las puntas
+            cv2.circle(img, (pulgar_x, pulgar_y), 10, Config.COLOR_FEEDBACK, -1)
+            cv2.circle(img, (indice_x, indice_y), 10, Config.COLOR_FEEDBACK, -1)
+
+    def ejecutar(self):
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+
+            frame = cv2.flip(frame, 1)
+            frame[:] = Config.COLOR_FONDO
+            h, w = frame.shape[:2]
+
+            # Procesar detección de manos
+            resultados = self.manos.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+            # Dibujar pieza
+            self.dibujar_pieza(frame)
+
+            # Mostrar información del nivel
+            cv2.putText(frame, f"Nivel: {self.nivel_actual + 1}/{len(self.niveles)}", 
+                       (10, 30), Config.FUENTE, 0.7, Config.COLOR_TEXTO, 2)
+            cv2.putText(frame, f"Puntuación: {self.puntuacion}", 
+                       (10, 60), Config.FUENTE, 0.7, Config.COLOR_TEXTO, 2)
+
+            if resultados.multi_hand_landmarks:
+                for mano_landmarks in resultados.multi_hand_landmarks:
+                    self.mp_dibujo.draw_landmarks(frame, mano_landmarks, self.mp_manos.HAND_CONNECTIONS)
+                    
+                    # Detectar tipo de agarre según nivel
+                    if self.diametro_pieza < 50:  # Agarres pequeños
+                        if self.detectar_agarre_pinza(mano_landmarks, frame.shape):
+                            self.angulo_pieza += self.velocidad_rotacion
+                            self.puntuacion += 1
+                    else:  # Agarres grandes
+                        if self.detectar_agarre_mano_completa(mano_landmarks, frame.shape):
+                            self.angulo_pieza += self.velocidad_rotacion
+                            self.puntuacion += 2
+                    
+                    # Mostrar feedback visual
+                    self.mostrar_feedback_agarre(frame, mano_landmarks)
+
+            # Actualizar vueltas restantes
+            self.calcular_vueltas_restantes()
+
+            # Comprobar si se completó el nivel
+            if self.vueltas_restantes == 0 and not self.nivel_completado:
+                self.nivel_completado = True
+                self.puntuacion += 20
+                mensaje = f"¡Nivel {self.nivel_actual + 1} completado! "
+                mensaje += "Excelente trabajo con tu motricidad fina."
+                self.mostrar_mensaje(frame, mensaje)
+                
+                # Preparar siguiente nivel o finalizar
+                self.nivel_actual += 1
+                if self.nivel_actual < len(self.niveles):
+                    self.iniciar_nivel()
+                else:
+                    mensaje = "¡Juego completado! Has demostrado gran habilidad."
+                    self.mostrar_mensaje(frame, mensaje, 5)
+
+            # Mostrar mensajes temporales
+            if time.time() < self.mostrar_mensaje_hasta:
+                texto_size = cv2.getTextSize(self.ultimo_mensaje, Config.FUENTE, 1, 2)[0]
+                texto_x = (w - texto_size[0]) // 2
+                cv2.putText(frame, self.ultimo_mensaje, 
+                          (texto_x, h // 2), 
+                          Config.FUENTE, 1, Config.COLOR_FELICITACION, 2)
+
+            cv2.imshow("Terapia de Motricidad Fina", frame)
+
+            key = cv2.waitKey(1)
+            if key == ord('q'):
+                break
+            elif key == ord('r'):
+                self.nivel_actual = 0
+                self.puntuacion = 0
+                self.iniciar_nivel()
+
+        self.cap.release()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    juego = JuegoDesenroscar()
+    juego.ejecutar()

@@ -1,0 +1,334 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import random
+import time
+from enum import Enum
+
+# Configuración del juego
+class Config:
+    ANCHO_VENTANA = 1000
+    ALTO_VENTANA = 700
+    COLOR_FONDO = (240, 240, 240)  # Será reemplazado por la cuadrícula
+    COLOR_TEXTO = (50, 50, 50)
+    FUENTE = cv2.FONT_HERSHEY_SIMPLEX
+    DURACION_DESTELLO = 0.5  # segundos
+    MAX_FIGURAS = 10
+    COLOR_VERDE_FLUO = (57, 255, 20)  # BGR para verde fluorescente
+    GROSOR_LINEAS = 3  # Más gruesas que el valor por defecto
+    TAMANIO_PUNTOS = 5  # Tamaño de los puntos de landmarks
+
+class NivelDificultad(Enum):
+    BASICO = {"velocidad": 1, "tamanio": 60, "frecuencia": 3, "figuras_simultaneas": 3}
+    INTERMEDIO = {"velocidad": 1.5, "tamanio": 45, "frecuencia": 2, "figuras_simultaneas": 6}
+    AVANZADO = {"velocidad": 2, "tamanio": 30, "frecuencia": 1, "figuras_simultaneas": 10}
+
+class FiguraGeometrica:
+    def __init__(self, ancho_ventana, alto_ventana, tamanio, velocidad):
+        self.tamanio = tamanio
+        self.velocidad = velocidad
+        self.x = random.randint(tamanio, ancho_ventana - tamanio)
+        self.y = random.randint(tamanio, alto_ventana - tamanio)
+        self.direccion = random.uniform(0, 2 * np.pi)
+        
+        # Tipo de figura: 0=círculo, 1=cuadrado, 2=triángulo
+        self.tipo = random.randint(0, 2)
+        
+        # Colores primarios (rojo, azul, amarillo)
+        self.colores = [
+            (0, 0, 255),  # Rojo
+            (255, 0, 0),  # Azul
+            (0, 255, 255)  # Amarillo
+        ]
+        self.color = random.choice(self.colores)
+        
+        self.activa = True
+        self.tiempo_destello = 0
+        self.destello_color = (0, 0, 0)
+        self.rotacion = 0
+        self.velocidad_rotacion = random.uniform(0.02, 0.05)
+
+    def actualizar(self, ancho_ventana, alto_ventana):
+        if not self.activa:
+            return
+
+        # Cambiar dirección aleatoriamente
+        if random.random() < 0.02:
+            self.direccion += random.uniform(-0.5, 0.5)
+
+        # Mover figura
+        self.x += np.cos(self.direccion) * self.velocidad
+        self.y += np.sin(self.direccion) * self.velocidad
+
+        # Rebotar en bordes
+        if self.x < self.tamanio or self.x > ancho_ventana - self.tamanio:
+            self.direccion = np.pi - self.direccion
+        if self.y < self.tamanio or self.y > alto_ventana - self.tamanio:
+            self.direccion = -self.direccion
+
+        # Rotación
+        self.rotacion += self.velocidad_rotacion
+
+    def dibujar(self, img):
+        if not self.activa:
+            # Mostrar destello si fue atrapada recientemente
+            if time.time() - self.tiempo_destello < Config.DURACION_DESTELLO:
+                cv2.circle(img, (int(self.x), int(self.y)), 
+                          int(self.tamanio * 1.5), self.destello_color, -1)
+            return
+
+        if self.tipo == 0:  # Círculo
+            cv2.circle(img, (int(self.x), int(self.y)), 
+                      int(self.tamanio), self.color, -1)
+        elif self.tipo == 1:  # Cuadrado (rotado)
+            pts = []
+            for i in range(4):
+                ang = self.rotacion + i * np.pi/2
+                pts.append((
+                    int(self.x + np.cos(ang) * self.tamanio),
+                    int(self.y + np.sin(ang) * self.tamanio)
+                ))
+            cv2.fillPoly(img, [np.array(pts)], self.color)
+        else:  # Triángulo
+            pts = []
+            for i in range(3):
+                ang = self.rotacion + i * 2 * np.pi/3
+                pts.append((
+                    int(self.x + np.cos(ang) * self.tamanio),
+                    int(self.y + np.sin(ang) * self.tamanio)
+                ))
+            cv2.fillPoly(img, [np.array(pts)], self.color)
+
+    def verificar_agarre(self, distancia_pulgar_indice, centro_pinza):
+        if not self.activa:
+            return False
+
+        distancia = np.sqrt((self.x - centro_pinza[0])**2 + (self.y - centro_pinza[1])**2)
+        if distancia < self.tamanio and distancia_pulgar_indice < self.tamanio:
+            self.activa = False
+            self.tiempo_destello = time.time()
+            self.destello_color = (
+                random.randint(200, 255),
+                random.randint(200, 255),
+                random.randint(200, 255)
+            )
+            return True
+        return False
+
+class JuegoFiguras:
+    def __init__(self):
+        self.cap = cv2.VideoCapture(0)
+        self.mp_manos = mp.solutions.hands
+        self.manos = self.mp_manos.Hands(
+            static_image_mode=False,
+            max_num_hands=2,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.5
+        )
+        
+        # Configurar estilo de dibujo para landmarks
+        self.estilo_dibujo = mp.solutions.drawing_utils.DrawingSpec(
+            color=Config.COLOR_VERDE_FLUO, 
+            thickness=Config.GROSOR_LINEAS)
+        
+        self.estilo_conexiones = mp.solutions.drawing_utils.DrawingSpec(
+            color=Config.COLOR_VERDE_FLUO,
+            thickness=Config.GROSOR_LINEAS)
+        
+        self.nivel_actual = NivelDificultad.BASICO
+        self.puntuacion = 0
+        self.figuras = []
+        self.ultima_figura_creada = 0
+        self.figuras_atrapadas = 0
+        self.tiempo_inicio_nivel = time.time()
+        self.duracion_nivel = 60  # segundos
+        self.juego_activo = True
+        self.mensaje = ""
+        self.tiempo_mensaje = 0
+
+    def dibujar_cuadricula(self, img, espacio=50):
+        """Dibuja una cuadrícula estilo Minecraft"""
+        color_linea = (200, 200, 200)
+        
+        # Líneas verticales
+        for x in range(0, Config.ANCHO_VENTANA, espacio):
+            cv2.line(img, (x, 0), (x, Config.ALTO_VENTANA), color_linea, 1)
+        
+        # Líneas horizontales
+        for y in range(0, Config.ALTO_VENTANA, espacio):
+            cv2.line(img, (0, y), (Config.ANCHO_VENTANA, y), color_linea, 1)
+
+    def iniciar_nivel(self, nivel):
+        self.nivel_actual = nivel
+        self.figuras = []
+        self.figuras_atrapadas = 0
+        self.tiempo_inicio_nivel = time.time()
+        self.ultima_figura_creada = time.time()
+        self.juego_activo = True
+        self.mensaje = f"Nivel {nivel.name.capitalize()} - Atrapa las figuras!"
+        self.tiempo_mensaje = time.time()
+
+    def crear_figuras(self):
+        config = self.nivel_actual.value
+        tiempo_actual = time.time()
+        
+        # Crear nuevas figuras según la frecuencia del nivel
+        if (tiempo_actual - self.ultima_figura_creada > config["frecuencia"] and
+            len([f for f in self.figuras if f.activa]) < config["figuras_simultaneas"] and
+            len(self.figuras) < Config.MAX_FIGURAS):
+            
+            self.figuras.append(
+                FiguraGeometrica(Config.ANCHO_VENTANA, Config.ALTO_VENTANA,
+                               config["tamanio"], config["velocidad"])
+            )
+            self.ultima_figura_creada = tiempo_actual
+
+    def actualizar_figuras(self):
+        for figura in self.figuras:
+            figura.actualizar(Config.ANCHO_VENTANA, Config.ALTO_VENTANA)
+
+        # Eliminar figuras inactivas después del destello
+        self.figuras = [
+            f for f in self.figuras 
+            if f.activa or (time.time() - f.tiempo_destello < Config.DURACION_DESTELLO)
+        ]
+
+    def dibujar_figuras(self, img):
+        for figura in self.figuras:
+            figura.dibujar(img)
+
+    def detectar_pinza(self, landmarks, frame_shape):
+        if not landmarks:
+            return 0, (0, 0)
+
+        pulgar = landmarks.landmark[self.mp_manos.HandLandmark.THUMB_TIP]
+        indice = landmarks.landmark[self.mp_manos.HandLandmark.INDEX_FINGER_TIP]
+        
+        h, w = frame_shape[:2]
+        pulgar_x, pulgar_y = int(pulgar.x * w), int(pulgar.y * h)
+        indice_x, indice_y = int(indice.x * w), int(indice.y * h)
+        
+        distancia = np.sqrt((pulgar_x - indice_x)**2 + (pulgar_y - indice_y)**2)
+        centro = ((pulgar_x + indice_x)//2, (pulgar_y + indice_y)//2)
+        
+        return distancia, centro
+
+    def verificar_colisiones(self, distancia_pinza, centro_pinza):
+        if distancia_pinza == 0:  # No se detectó pinza
+            return
+
+        for figura in self.figuras:
+            if figura.verificar_agarre(distancia_pinza, centro_pinza):
+                self.figuras_atrapadas += 1
+                self.puntuacion += 10 * (self.nivel_actual.value["figuras_simultaneas"] / 3)
+
+    def mostrar_info_juego(self, img):
+        # Mostrar puntuación y tiempo restante
+        tiempo_restante = max(0, self.duracion_nivel - (time.time() - self.tiempo_inicio_nivel))
+        cv2.putText(img, f"Puntuación: {self.puntuacion}", (20, 40), 
+                   Config.FUENTE, 0.8, Config.COLOR_TEXTO, 2)
+        cv2.putText(img, f"Tiempo: {int(tiempo_restante)}s", (20, 80), 
+                   Config.FUENTE, 0.8, Config.COLOR_TEXTO, 2)
+        cv2.putText(img, f"Figuras: {self.figuras_atrapadas}", (20, 120), 
+                   Config.FUENTE, 0.8, Config.COLOR_TEXTO, 2)
+        cv2.putText(img, f"Nivel: {self.nivel_actual.name.capitalize()}", (20, 160), 
+                   Config.FUENTE, 0.8, Config.COLOR_TEXTO, 2)
+
+        # Mostrar mensajes temporales
+        if time.time() - self.tiempo_mensaje < 3:
+            texto_size = cv2.getTextSize(self.mensaje, Config.FUENTE, 0.8, 2)[0]
+            texto_x = (Config.ANCHO_VENTANA - texto_size[0]) // 2
+            cv2.putText(img, self.mensaje, (texto_x, 40), 
+                       Config.FUENTE, 0.8, Config.COLOR_TEXTO, 2)
+
+    def verificar_fin_nivel(self):
+        tiempo_transcurrido = time.time() - self.tiempo_inicio_nivel
+        if tiempo_transcurrido > self.duracion_nivel:
+            self.juego_activo = False
+            if self.nivel_actual == NivelDificultad.BASICO:
+                self.mensaje = "¡Nivel Básico completado! Pasando a Intermedio..."
+                self.tiempo_mensaje = time.time()
+                self.iniciar_nivel(NivelDificultad.INTERMEDIO)
+            elif self.nivel_actual == NivelDificultad.INTERMEDIO:
+                self.mensaje = "¡Nivel Intermedio completado! Pasando a Avanzado..."
+                self.tiempo_mensaje = time.time()
+                self.iniciar_nivel(NivelDificultad.AVANZADO)
+            else:
+                self.mensaje = "¡Juego completado! Excelente trabajo."
+                self.tiempo_mensaje = time.time()
+                return True
+        return False
+
+    def ejecutar(self):
+        self.iniciar_nivel(NivelDificultad.BASICO)
+
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+
+            frame = cv2.flip(frame, 1)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w = frame.shape[:2]
+
+            # Crear imagen del juego con fondo de cuadrícula
+            img_juego = np.full((Config.ALTO_VENTANA, Config.ANCHO_VENTANA, 3), 
+                        255, dtype=np.uint8)
+            self.dibujar_cuadricula(img_juego)
+
+            # Procesar detección de manos
+            resultados = self.manos.process(frame_rgb)
+
+            if self.juego_activo:
+                # Lógica del juego
+                self.crear_figuras()
+                self.actualizar_figuras()
+                self.dibujar_figuras(img_juego)
+
+                # Detectar gesto de pinza
+                distancia_pinza, centro_pinza = 0, (0, 0)
+                if resultados.multi_hand_landmarks:
+                    for mano_landmarks in resultados.multi_hand_landmarks:
+                        # Dibujar landmarks con el nuevo estilo
+                        mp.solutions.drawing_utils.draw_landmarks(
+                            img_juego, 
+                            mano_landmarks, 
+                            self.mp_manos.HAND_CONNECTIONS,
+                            self.estilo_dibujo,
+                            self.estilo_conexiones)
+                        
+                        distancia_pinza, centro_pinza = self.detectar_pinza(mano_landmarks, img_juego.shape)
+
+                # Verificar si se atrapó una figura
+                self.verificar_colisiones(distancia_pinza, centro_pinza)
+
+                # Mostrar información del juego
+                self.mostrar_info_juego(img_juego)
+
+                # Verificar si terminó el nivel
+                if self.verificar_fin_nivel():
+                    self.juego_activo = False
+
+            # Mostrar mensaje final
+            if not self.juego_activo and time.time() - self.tiempo_mensaje < 5:
+                texto_size = cv2.getTextSize(self.mensaje, Config.FUENTE, 1, 2)[0]
+                texto_x = (Config.ANCHO_VENTANA - texto_size[0]) // 2
+                texto_y = (Config.ALTO_VENTANA + texto_size[1]) // 2
+                cv2.putText(img_juego, self.mensaje, (texto_x, texto_y), 
+                           Config.FUENTE, 1, (0, 100, 200), 2)
+
+            cv2.imshow("Terapia Visual con Figuras", img_juego)
+
+            key = cv2.waitKey(1)
+            if key == ord('q'):
+                break
+            elif key == ord('r'):
+                self.iniciar_nivel(NivelDificultad.BASICO)
+                self.puntuacion = 0
+
+        self.cap.release()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    juego = JuegoFiguras()
+    juego.ejecutar()

@@ -1,0 +1,257 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+
+# Dimensiones de la ventana del juego
+ANCHO_VENTANA = 800
+ALTO_VENTANA = 600
+
+# Colores
+COLOR_FONDO = (255, 255, 255)  # Blanco
+COLOR_PIEZA = (50, 150, 250)  # Azul claro
+COLOR_TEXTO = (0, 0, 0)      # Negro
+COLOR_FELICITACION = (0, 255, 0) # Verde para el mensaje de felicitación
+
+# Inicialización de MediaPipe Hands
+mp_manos = mp.solutions.hands
+manos = mp_manos.Hands(static_image_mode=False,
+                      max_num_hands=1,
+                      min_detection_confidence=0.7,
+                      min_tracking_confidence=0.5)
+mp_dibujo = mp.solutions.drawing_utils
+
+# Función para dibujar una pieza enroscada (simplificada)
+def dibujar_pieza(img, x, y, diametro, longitud_rosca, vueltas_restantes, angulo):
+    """
+    Dibuja una representación simplificada de una pieza enroscada.
+
+    Args:
+        img: La imagen de OpenCV en la que dibujar.
+        x: Coordenada x del centro de la pieza.
+        y: Coordenada y del centro de la pieza.
+        diametro: Diámetro de la pieza.
+        longitud_rosca: Longitud de la rosca (para calcular el número total de vueltas).
+        vueltas_restantes: Número de vueltas restantes para desenroscar.
+        angulo: Ángulo de rotación de la pieza.
+    """
+    # Dibujar el cuerpo de la pieza (un rectángulo para simplificar)
+    largo_pieza = diametro * 3  # La longitud es proporcional al diámetro
+    cv2.rectangle(img, (int(x - diametro / 2), int(y - diametro / 2)),
+                  (int(x + diametro / 2), int(y + largo_pieza - diametro / 2)),
+                  COLOR_PIEZA, -1)
+
+    # Dibujar la rosca (líneas espirales simplificadas)
+    num_lineas_rosca = 8  # Número de líneas de rosca
+    espaciado_rosca = largo_pieza / num_lineas_rosca
+    for i in range(num_lineas_rosca):
+        y_actual = y + i * espaciado_rosca - diametro/2
+        # Simular la rotación de la rosca con el ángulo
+        x_inicio = int(x - diametro / 2 * np.cos(angulo + i * np.pi / 4))
+        x_fin = int(x + diametro / 2 * np.cos(angulo + i * np.pi / 4))
+
+        cv2.line(img, (x_inicio, int(y_actual)), (x_fin, int(y_actual)), (0,0,0), 2)
+
+    # Dibujar la cabeza de la pieza (un círculo)
+    cv2.circle(img, (int(x), int(y - diametro / 2)), int(diametro / 2), COLOR_PIEZA, -1)
+
+    # Mostrar el contador de vueltas sobre la pieza
+    cv2.putText(img, str(vueltas_restantes), (int(x - 20), int(y)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_TEXTO, 2)
+
+
+
+def calcular_vueltas(angulo_inicial, angulo_actual, total_vueltas):
+    """
+    Calcula el número de vueltas restantes basándose en el cambio de ángulo.
+
+    Args:
+        angulo_inicial: Ángulo inicial de la pieza.
+        angulo_actual: Ángulo actual de la pieza.
+        total_vueltas: Número total de vueltas para desenroscar.
+
+    Returns:
+        El número de vueltas restantes (entero).
+    """
+    # Normalizar la diferencia de ángulo al rango de 0 a 2*pi
+    diff_angulo = (angulo_actual - angulo_inicial) % (2 * np.pi)
+    if diff_angulo < 0:
+        diff_angulo += 2 * np.pi
+    vueltas_completadas = diff_angulo / (2 * np.pi)
+    vueltas_restantes = int(max(0, total_vueltas - vueltas_completadas)) # Aseguramos que no sea negativo
+    return vueltas_restantes
+
+def detectar_movimiento_desenroscado(mano_landmarks, diametro_pieza):
+    """
+    Detecta el movimiento de desenroscado basado en los landmarks de la mano.
+
+    Args:
+        mano_landmarks: Los landmarks de la mano detectados por MediaPipe.
+        diametro_pieza: El diametro de la pieza actual, para diferenciar entre
+                        agarre de pinza y agarre de mano completa.
+
+    Returns:
+        True si se detecta un movimiento de desenroscado, False de lo contrario.
+    """
+    if mano_landmarks is None:
+        return False
+
+    # Obtener las coordenadas de algunos puntos clave de la mano
+    pulgar = mano_landmarks.landmark[mp_manos.HandLandmark.THUMB_TIP]
+    indice = mano_landmarks.landmark[mp_manos.HandLandmark.INDEX_FINGER_TIP]
+    medio = mano_landmarks.landmark[mp_manos.HandLandmark.MIDDLE_FINGER_TIP]
+    muneca = mano_landmarks.landmark[mp_manos.HandLandmark.WRIST]
+
+    # Normalizar las coordenadas a las dimensiones de la imagen (0 a 1)
+    altura, ancho, _ = frame.shape
+    pulgar_x, pulgar_y = int(pulgar.x * ancho), int(pulgar.y * altura)
+    indice_x, indice_y = int(indice.x * ancho), int(indice.y * altura)
+    medio_x, medio_y = int(medio.x * ancho), int(medio.y * altura)
+    muneca_x, muneca_y = int(muneca.x * ancho), int(muneca.y * altura)
+
+    # Si la pieza es pequeña, usar la pinza (pulgar e índice)
+    if diametro_pieza < 50:  # Ajustar este umbral según sea necesario
+        distancia_pulgar_indice = np.sqrt((pulgar_x - indice_x) ** 2 + (pulgar_y - indice_y) ** 2)
+        # Considerar que hay un movimiento de desenroscado si la distancia entre el pulgar e índice es pequeña
+        # y si hay un movimiento de rotación (cambio en la orientación de la pinza)
+        if distancia_pulgar_indice < 70: # Umbral de distancia
+            # Calculamos los ángulos de los vectores formados por los dedos
+            vector1_x = indice_x - pulgar_x
+            vector1_y = indice_y - pulgar_y
+            vector2_x = medio_x - pulgar_x
+            vector2_y = medio_y - pulgar_y
+
+            angulo1 = np.arctan2(vector1_y, vector1_x)
+            angulo2 = np.arctan2(vector2_y, vector2_x)
+            diff_angulo = angulo2 - angulo1
+
+            # Normalizar la diferencia de ángulo
+            diff_angulo = (diff_angulo + np.pi) % (2 * np.pi) - np.pi
+            # Considerar que se desenrosca si el ángulo cambia
+            if abs(diff_angulo) > 0.1: # Umbral de cambio de ángulo
+                return True
+        else:
+            return False
+
+    # Si la pieza es grande, usar la mano completa y la muñeca
+    else:
+        # Detectar si los dedos están cerca de la pieza (sujeción)
+        distancia_pulgar = np.sqrt((pulgar_x - x_pieza) ** 2 + (pulgar_y - y_pieza) ** 2)
+        distancia_indice = np.sqrt((indice_x - x_pieza) ** 2 + (indice_y - y_pieza) ** 2)
+        distancia_medio = np.sqrt((medio_x - x_pieza) ** 2 + (medio_y - y_pieza) ** 2)
+        if distancia_pulgar < diametro_pieza * 1.5 and distancia_indice < diametro_pieza * 1.5 and distancia_medio < diametro_pieza * 1.5:
+            # Detectar la rotación de la muñeca (pronación/supinación)
+            # Esto es más complejo y puede requerir un análisis más robusto del movimiento 3D de la muñeca.
+            # Aquí, lo simplificamos con un cambio en la coordenada X de la muñeca
+            if abs(muneca_x - x_muneca_anterior) > 10: # Umbral de movimiento de la muñeca
+                return True
+            else:
+                return False
+        else:
+            return False
+    return False
+
+# Inicialización de las variables del juego
+num_vueltas_iniciales = 10  # Número total de vueltas para la primera pieza
+vueltas_restantes = num_vueltas_iniciales
+angulo_pieza = 0.0
+angulo_inicial = 0.0
+x_pieza = ANCHO_VENTANA // 2
+y_pieza = ALTO_VENTANA // 2
+diametro_pieza = 80
+longitud_rosca = diametro_pieza * 3
+nivel = 1
+puntuacion = 0
+x_muneca_anterior = 0
+juego_completado = False # Variable para controlar si el juego se ha completado
+
+
+# Bucle principal del juego
+cap = cv2.VideoCapture(1)  # Inicializar la captura de video desde la cámara
+
+while True:
+    ret, frame = cap.read()  # Leer un frame de la cámara
+    if not ret:
+        break  # Si no se pudo leer el frame, salir del bucle
+
+    # Voltear el frame horizontalmente para una mejor experiencia de usuario
+    frame = cv2.flip(frame, 1)
+
+    # Establecer el fondo del juego
+    frame[:] = COLOR_FONDO
+
+    # Procesar el frame con MediaPipe Hands
+    resultados = manos.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+    # Dibujar la pieza enroscada
+    dibujar_pieza(frame, x_pieza, y_pieza, diametro_pieza, longitud_rosca, vueltas_restantes, angulo_pieza)
+
+    # Si se detectan manos
+    if resultados.multi_hand_landmarks:
+        for mano_landmarks in resultados.multi_hand_landmarks:
+            mp_dibujo.draw_landmarks(frame, mano_landmarks, mp_manos.HAND_CONNECTIONS)
+
+            # Detectar el movimiento de desenroscado
+            if detectar_movimiento_desenroscado(mano_landmarks, diametro_pieza):
+                vueltas_restantes = calcular_vueltas(angulo_inicial, angulo_pieza, num_vueltas_iniciales)
+                angulo_pieza += 0.1  # Incrementar el ángulo de la pieza
+                puntuacion += 1
+                angulo_inicial = angulo_pieza # Actualizar el angulo inicial para el calculo de las vueltas restantes
+
+            #Guardar la coordenada x de la muñeca para el frame anterior
+            x_muneca_anterior = int(mano_landmarks.landmark[mp_manos.HandLandmark.WRIST].x * ancho)
+
+    # Mostrar la puntuación
+    cv2.putText(frame, f"Puntuacion: {puntuacion}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_TEXTO, 2)
+    # Mostrar el nivel
+    cv2.putText(frame, f"Nivel: {nivel}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_TEXTO, 2)
+
+    # Mostrar el frame resultante
+    cv2.imshow("DesroscaManos", frame)
+
+    # Manejar la entrada del teclado
+    key = cv2.waitKey(1)
+    if key == ord('q'):  # Salir del juego si se presiona 'q'
+        break
+    elif key == ord('r'):  # Reiniciar el juego si se presiona 'r'
+        vueltas_restantes = num_vueltas_iniciales
+        angulo_pieza = 0.0
+        puntuacion = 0
+        nivel = 1
+        diametro_pieza = 80
+        juego_completado = False # Reiniciar el estado del juego completado
+    elif key == ord('n') and juego_completado: # Pasar al siguiente nivel si se presiona 'n' y el juego está completado
+        nivel += 1
+        diametro_pieza = max(30, diametro_pieza - 10)
+        num_vueltas_iniciales += 5
+        vueltas_restantes = num_vueltas_iniciales
+        angulo_pieza = 0.0
+        angulo_inicial = 0.0
+        juego_completado = False
+
+    # Si se han completado todas las vueltas, pasar al siguiente nivel
+    if vueltas_restantes == 0:
+        puntuacion += 10  # Recompensa por completar el nivel
+        cv2.putText(frame, "¡Felicitaciones! ¡Buen trabajo!", (ANCHO_VENTANA // 4, ALTO_VENTANA // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, COLOR_FELICITACION, 2)
+        juego_completado = True # Indicar que el juego se ha completado
+        if nivel < 3:
+             cv2.putText(frame, "Presiona 'n' para el siguiente nivel", (ANCHO_VENTANA // 4, (ALTO_VENTANA // 2) + 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_TEXTO, 2)
+        else:
+            cv2.putText(frame, "¡Juego Completado! ¡Excelente!", (ANCHO_VENTANA // 4, (ALTO_VENTANA // 2) + 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_TEXTO, 2)
+        cv2.imshow("DesroscaManos", frame) # Mostrar el frame con el mensaje
+        cv2.waitKey(0)
+        if nivel < 3: # Solo avanzar de nivel si no se ha llegado al nivel final
+            nivel += 1
+            diametro_pieza = max(30, diametro_pieza - 10)
+            num_vueltas_iniciales += 5
+            vueltas_restantes = num_vueltas_iniciales
+            angulo_pieza = 0.0 # Reiniciar el angulo de la pieza para el nuevo nivel
+            angulo_inicial = 0.0
+        else:
+            break # Salir del juego si se han completado todos los niveles
+
+# Liberar los recursos
+cap.release()
+cv2.destroyAllWindows()

@@ -1,0 +1,55 @@
+import turtle
+import math
+
+pantalla = turtle.Screen()
+pantalla.bgcolor("blue")
+pantalla.title("Mini Sistema Planetario")
+
+sol = turtle.Turtle()
+sol.shape("circle")
+sol.color("yellow")
+sol.shapesize(2)
+
+planetas = []
+colores = ["white", "red", "green", "blue", "orange"]
+tamaños = [0.5, 0.7, 0.6, 0.8, 0.4]
+radios_orbita = [120, 180, 240, 300, 360]
+velocidades = [2, 1.5, 1.2, 0.8, 0.6]
+
+for i in range(5):
+    planeta = turtle.Turtle()
+    planeta.shape("circle")
+    planeta.color(colores[i])
+    planeta.shapesize(tamaños[i])
+    planeta.penup()
+    planetas.append({
+        "turtle": planeta,
+        "radio": radios_orbita[i],
+        "angulo": i * 72,  # Distribuir inicialmente
+        "velocidad": velocidades[i]
+    })
+
+# Bucle principal mejorado
+try:
+    while True:
+        pantalla.update()  # Actualizar pantalla una vez por frame
+        
+        for planeta_info in planetas:
+            # Calcular nueva posición
+            angulo_rad = math.radians(planeta_info["angulo"])
+            x = planeta_info["radio"] * math.cos(angulo_rad)
+            y = planeta_info["radio"] * math.sin(angulo_rad) * 0.8  # Órbita elíptica
+            
+            # Mover planeta
+            planeta_info["turtle"].goto(x, y)
+            
+            # Actualizar ángulo
+            planeta_info["angulo"] += planeta_info["velocidad"]
+            if planeta_info["angulo"] >= 360:
+                planeta_info["angulo"] = 0
+        
+        time.sleep(0.02)  # Controlar velocidad de animación
+
+except:
+    print("Simulación terminada")
+    pantalla.bye() 

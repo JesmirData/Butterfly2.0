@@ -1,0 +1,308 @@
+import cv2
+import numpy as np
+import mediapipe as mp
+import random
+import time
+import pygame
+from collections import defaultdict
+
+# Inicializar pygame para sonidos
+pygame.mixer.init()
+try:
+    beep_sound = pygame.mixer.Sound('beep.wav')
+except:
+    beep_sound = pygame.mixer.Sound(buffer=np.zeros(1000))
+
+# Inicializar MediaPipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+mp_draw = mp.solutions.drawing_utils
+
+# Inicializar la cámara
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 800)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 800)
+
+# Configuración del juego
+BOARD_SIZE = 600
+MARGIN = 50
+CELL_SIZE = BOARD_SIZE // 3
+
+# Colores
+COLORS = {
+    'white': (255, 255, 255),
+    'black': (0, 0, 0),
+    'red': (0, 0, 255),
+    'green': (0, 255, 0),
+    'blue': (255, 0, 0),
+    'dark_blue': (255, 100, 0),
+    'bright_green': (0, 255, 100),
+    'yellow': (0, 255, 255)
+}
+
+# Estado del juego
+def reset_game():
+    return {
+        'board': [['' for _ in range(3)] for _ in range(3)],
+        'player_symbol': 'X',
+        'computer_symbol': 'O',
+        'current_player': 'X',
+        'game_over': False,
+        'winner': None,
+        'winning_line': None,
+        'start_time': time.time(),
+        'game_duration': 60,
+        'last_move_time': time.time(),
+        'message': ""
+    }
+
+game_state = reset_game()
+
+def draw_board(frame):
+    """Dibuja el tablero y las figuras"""
+    board_img = np.ones((BOARD_SIZE, BOARD_SIZE, 3), dtype=np.uint8) * 255
+    
+    # Dibujar líneas del tablero
+    for i in range(1, 3):
+        cv2.line(board_img, (i * CELL_SIZE, 0), (i * CELL_SIZE, BOARD_SIZE), COLORS['black'], 2)
+        cv2.line(board_img, (0, i * CELL_SIZE), (BOARD_SIZE, i * CELL_SIZE), COLORS['black'], 2)
+    
+    # Dibujar figuras
+    for row in range(3):
+        for col in range(3):
+            center_x = col * CELL_SIZE + CELL_SIZE // 2
+            center_y = row * CELL_SIZE + CELL_SIZE // 2
+            if game_state['board'][row][col] == 'X':
+                size = CELL_SIZE // 3
+                cv2.line(board_img, (center_x - size, center_y - size), 
+                        (center_x + size, center_y + size), COLORS['dark_blue'], 5)
+                cv2.line(board_img, (center_x - size, center_y + size), 
+                        (center_x + size, center_y - size), COLORS['dark_blue'], 5)
+            elif game_state['board'][row][col] == 'O':
+                radius = CELL_SIZE // 3
+                cv2.circle(board_img, (center_x, center_y), radius, COLORS['bright_green'], -1)
+                cv2.circle(board_img, (center_x, center_y), radius, COLORS['black'], 2)
+    
+    # Dibujar línea ganadora
+    if game_state['winning_line']:
+        (start_row, start_col), (end_row, end_col) = game_state['winning_line']
+        start_x = MARGIN + start_col * CELL_SIZE + CELL_SIZE // 2
+        start_y = MARGIN + start_row * CELL_SIZE + CELL_SIZE // 2
+        end_x = MARGIN + end_col * CELL_SIZE + CELL_SIZE // 2
+        end_y = MARGIN + end_row * CELL_SIZE + CELL_SIZE // 2
+        cv2.line(frame, (start_x, start_y), (end_x, end_y), COLORS['red'], 5)
+    
+    frame[MARGIN:MARGIN+BOARD_SIZE, MARGIN:MARGIN+BOARD_SIZE] = board_img
+    return frame
+
+def check_winner(board):
+    """Verifica si hay un ganador y devuelve la línea ganadora"""
+    # Verificar filas
+    for row in range(3):
+        if board[row][0] == board[row][1] == board[row][2] != '':
+            return board[row][0], ((row, 0), (row, 2))
+    
+    # Verificar columnas
+    for col in range(3):
+        if board[0][col] == board[1][col] == board[2][col] != '':
+            return board[0][col], ((0, col), (2, col))
+    
+    # Verificar diagonales
+    if board[0][0] == board[1][1] == board[2][2] != '':
+        return board[0][0], ((0, 0), (2, 2))
+    if board[0][2] == board[1][1] == board[2][0] != '':
+        return board[0][2], ((0, 2), (2, 0))
+    
+    return None, None
+
+def find_winning_move(board, symbol):
+    """Encuentra un movimiento ganador para el símbolo dado"""
+    for row in range(3):
+        for col in range(3):
+            if board[row][col] == '':
+                # Simular movimiento
+                board[row][col] = symbol
+                winner, _ = check_winner(board)
+                # Deshacer movimiento
+                board[row][col] = ''
+                if winner == symbol:
+                    return row, col
+    return None
+
+def computer_move():
+    """Realiza un movimiento inteligente de la computadora"""
+    board = game_state['board']
+    computer_symbol = game_state['computer_symbol']
+    player_symbol = game_state['player_symbol']
+    
+    # 1. Primero verificar si la computadora puede ganar
+    move = find_winning_move(board, computer_symbol)
+    if move:
+        row, col = move
+        board[row][col] = computer_symbol
+        beep_sound.play()
+        return True
+    
+    # 2. Si no, bloquear al jugador si puede ganar
+    move = find_winning_move(board, player_symbol)
+    if move:
+        row, col = move
+        board[row][col] = computer_symbol
+        beep_sound.play()
+        return True
+    
+    # 3. Si no, elegir un movimiento aleatorio
+    empty_cells = [(row, col) for row in range(3) for col in range(3) if board[row][col] == '']
+    if empty_cells:
+        row, col = random.choice(empty_cells)
+        board[row][col] = computer_symbol
+        beep_sound.play()
+        return True
+    
+    return False
+
+def get_finger_position(hand_landmarks, frame_shape):
+    """Obtiene la posición del dedo en el tablero"""
+    index_finger = hand_landmarks.landmark[8]
+    h, w = frame_shape[:2]
+    x, y = int(index_finger.x * w), int(index_finger.y * h)
+    
+    if (MARGIN <= x < MARGIN + BOARD_SIZE and MARGIN <= y < MARGIN + BOARD_SIZE):
+        col = (x - MARGIN) // CELL_SIZE
+        row = (y - MARGIN) // CELL_SIZE
+        return row, col
+    return None, None
+
+def draw_game_info(frame):
+    """Dibuja la información del juego en pantalla"""
+    elapsed = time.time() - game_state['start_time']
+    remaining = max(0, game_state['game_duration'] - elapsed)
+    
+    cv2.putText(frame, f"Tiempo: {int(remaining)}s", (MARGIN, 30), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLORS['black'], 2)
+    
+    if not game_state['game_over']:
+        turn_text = f"Turno: {'Jugador (X)' if game_state['current_player'] == 'X' else 'Computadora (O)'}"
+        cv2.putText(frame, turn_text, (MARGIN + BOARD_SIZE - 300, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLORS['black'], 2)
+    else:
+        if game_state['winner'] == 'Tie':
+            message = "¡Empate!"
+        else:
+            winner = "Jugador (X)" if game_state['winner'] == 'X' else "Computadora (O)"
+            message = f"¡{winner} gana!"
+        
+        text_size = cv2.getTextSize(message, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
+        text_x = (frame.shape[1] - text_size[0]) // 2
+        cv2.putText(frame, message, (text_x, MARGIN + BOARD_SIZE + 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, COLORS['yellow'], 3)
+        
+        # Botón de reinicio
+        cv2.rectangle(frame, (text_x - 20, MARGIN + BOARD_SIZE + 90), 
+                     (text_x + text_size[0] + 20, MARGIN + BOARD_SIZE + 140), COLORS['green'], -1)
+        cv2.putText(frame, "Reiniciar", (text_x, MARGIN + BOARD_SIZE + 130), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, COLORS['white'], 2)
+    
+    return frame
+
+def handle_click(x, y):
+    """Maneja el clic para reiniciar el juego"""
+    if game_state['game_over']:
+        text_size = cv2.getTextSize("¡Empate!" if game_state['winner'] == 'Tie' else 
+                                  f"¡{'Jugador (X)' if game_state['winner'] == 'X' else 'Computadora (O)'} gana!", 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
+        text_x = (800 - text_size[0]) // 2
+        
+        if (text_x - 20 <= x <= text_x + text_size[0] + 20 and 
+            MARGIN + BOARD_SIZE + 90 <= y <= MARGIN + BOARD_SIZE + 140):
+            game_state.update(reset_game())
+
+# Bucle principal del juego
+print("Juego de Cara o Cruz - Tres en raya con Inteligencia Artificial")
+print("Instrucciones:")
+print("1. Usa tu dedo índice para seleccionar casillas")
+print("2. Mantén tu dedo en una casilla por 1 segundo para seleccionarla")
+print("3. La computadora ahora bloquea tus jugadas ganadoras")
+
+while cap.isOpened():
+    ret, frame = cap.read()
+    if not ret:
+        continue
+    
+    frame = cv2.flip(frame, 1)
+    display_frame = np.ones((MARGIN*2 + BOARD_SIZE, MARGIN*2 + BOARD_SIZE, 3), dtype=np.uint8) * 255
+    
+    # Procesar detección de manos
+    frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = hands.process(frame_rgb)
+    
+    # Dibujar tablero
+    display_frame = draw_board(display_frame)
+    
+    # Verificar tiempo
+    elapsed = time.time() - game_state['start_time']
+    if elapsed >= game_state['game_duration'] and not game_state['game_over']:
+        game_state['game_over'] = True
+        game_state['winner'], game_state['winning_line'] = check_winner(game_state['board'])
+    
+    if not game_state['game_over']:
+        # Turno del jugador
+        if game_state['current_player'] == game_state['player_symbol'] and results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                mp_draw.draw_landmarks(display_frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
+                
+                row, col = get_finger_position(hand_landmarks, display_frame.shape)
+                if row is not None and col is not None and game_state['board'][row][col] == '':
+                    # Resaltar casilla seleccionada
+                    x1 = MARGIN + col * CELL_SIZE
+                    y1 = MARGIN + row * CELL_SIZE
+                    cv2.rectangle(display_frame, (x1, y1), (x1 + CELL_SIZE, y1 + CELL_SIZE), COLORS['green'], 2)
+                    
+                    # Confirmar selección después de 1 segundo
+                    if time.time() - game_state['last_move_time'] > 1.0:
+                        game_state['board'][row][col] = game_state['player_symbol']
+                        beep_sound.play()
+                        game_state['winner'], game_state['winning_line'] = check_winner(game_state['board'])
+                        
+                        if game_state['winner']:
+                            game_state['game_over'] = True
+                        elif all(cell != '' for row in game_state['board'] for cell in row):
+                            game_state['game_over'] = True
+                            game_state['winner'] = 'Tie'
+                        else:
+                            game_state['current_player'] = game_state['computer_symbol']
+                            game_state['last_move_time'] = time.time()
+        
+        # Turno de la computadora
+        elif game_state['current_player'] == game_state['computer_symbol']:
+            if time.time() - game_state['last_move_time'] > 0.5:
+                if computer_move():
+                    game_state['winner'], game_state['winning_line'] = check_winner(game_state['board'])
+                    
+                    if game_state['winner']:
+                        game_state['game_over'] = True
+                    elif all(cell != '' for row in game_state['board'] for cell in row):
+                        game_state['game_over'] = True
+                        game_state['winner'] = 'Tie'
+                    else:
+                        game_state['current_player'] = game_state['player_symbol']
+                    game_state['last_move_time'] = time.time()
+                else:
+                    game_state['game_over'] = True
+                    game_state['winner'] = 'Tie'
+    
+    # Dibujar información del juego
+    display_frame = draw_game_info(display_frame)
+    
+    # Mostrar frame
+    cv2.imshow('Cara o Cruz - Tres en raya', display_frame)
+    
+    # Manejar eventos
+    key = cv2.waitKey(1)
+    if key == 27 or key == ord('q'):  # ESC o Q para salir
+        break
+    elif key == ord('r'):  # R para reiniciar
+        game_state.update(reset_game())
+
+cap.release()
+cv2.destroyAllWindows()

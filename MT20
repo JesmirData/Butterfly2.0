@@ -1,0 +1,304 @@
+import cv2
+import numpy as np
+import mediapipe as mp
+import pyglet
+from pyglet.gl import *
+import math
+import random
+from collections import deque
+
+# Configuración inicial
+WINDOW_WIDTH = 800
+WINDOW_HEIGHT = 600
+FPS = 60
+
+# Colores
+COLOR_BOLT = (0.2, 0.4, 0.8, 1.0)  # Azul oscuro
+COLOR_NUT = (0.9, 0.8, 0.1, 1.0)    # Amarillo intenso
+COLOR_BG = (0.1, 0.1, 0.1, 1.0)     # Fondo oscuro
+
+# Configuración de niveles
+LEVELS = {
+    1: {'required_turns': 3, 'speed': 1.0},
+    2: {'required_turns': 5, 'speed': 1.5},
+    3: {'required_turns': 8, 'speed': 2.0}
+}
+
+class NutAndBoltGame:
+    def __init__(self):
+        self.window = pyglet.window.Window(WINDOW_WIDTH, WINDOW_HEIGHT, caption="Juego de Tuerca 3D")
+        self.batch = pyglet.graphics.Batch()
+        
+        # Estado del juego
+        self.current_level = 1
+        self.completed_turns = 0
+        self.progress = 0.0
+        self.game_state = "playing"  # "playing", "level_complete", "game_complete"
+        
+        # Modelos 3D
+        self.bolt = self.create_bolt()
+        self.nut = self.create_nut()
+        self.nut_position = [0, 0, -5]
+        self.nut_rotation = 0
+        
+        # Configuración de MediaPipe Hands
+        self.mp_hands = mp.solutions.hands
+        self.hands = self.mp_hands.Hands(
+            max_num_hands=1,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.5)
+        
+        # Configuración de la cámara
+        self.cap = cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        # Configurar eventos
+        self.window.event(self.on_draw)
+        pyglet.clock.schedule_interval(self.update, 1.0/FPS)
+    
+    def create_bolt(self):
+        """Crea un modelo 3D de un perno/tornillo"""
+        bolt = pyglet.graphics.Batch()
+        
+        # Cuerpo principal del perno (cilindro)
+        height = 2.0
+        radius = 0.5
+        slices = 32
+        
+        # Rosca del perno (hélice)
+        thread_radius = 0.55
+        thread_pitch = 0.2
+        thread_length = height + 0.5
+        
+        return bolt
+    
+    def create_nut(self):
+        """Crea un modelo 3D de una tuerca hexagonal"""
+        nut = pyglet.graphics.Batch()
+        sides = 8  # Tuerca de 8 caras
+        radius = 0.6
+        height = 0.4
+        
+        return nut
+    
+    def update(self, dt):
+        """Actualiza la lógica del juego"""
+        if self.game_state != "playing":
+            return
+            
+        # Capturar y procesar el frame de la cámara
+        ret, frame = self.cap.read()
+        if not ret:
+            return
+            
+        frame = cv2.flip(frame, 1)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(frame_rgb)
+        
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                # Calcular posición y rotación basada en la mano
+                self.handle_hand_interaction(hand_landmarks)
+                
+                # Verificar si la tuerca está alineada con el perno
+                if self.check_nut_alignment():
+                    # Calcular progreso del giro
+                    self.update_turn_progress()
+    
+    def handle_hand_interaction(self, hand_landmarks):
+        """Controla la interacción de la mano con la tuerca"""
+        # Obtener posición del pulgar (landmark 4) e índice (landmark 8)
+        thumb = hand_landmarks.landmark[4]
+        index = hand_landmarks.landmark[8]
+        
+        # Calcular distancia entre dedos para "agarrar" la tuerca
+        distance = math.sqrt((thumb.x - index.x)**2 + (thumb.y - index.y)**2)
+        
+        if distance < 0.05:  # Umbral para agarrar
+            # Mover la tuerca con la mano
+            self.nut_position[0] = (thumb.x + index.x) / 2 * 4 - 2  # Mapear a coordenadas 3D
+            self.nut_position[1] = (thumb.y + index.y) / 2 * 3 - 1.5
+            
+            # Rotar la tuerca basado en movimiento de la mano
+            self.nut_rotation += (thumb.x - index.x) * 10
+    
+    def check_nut_alignment(self):
+        """Verifica si la tuerca está alineada con el perno"""
+        # Simulación simple de alineación
+        return abs(self.nut_position[0]) < 0.3 and abs(self.nut_position[1]) < 0.3
+    
+    def update_turn_progress(self):
+        """Actualiza el progreso del giro cuando la tuerca está alineada"""
+        level_speed = LEVELS[self.current_level]['speed']
+        self.progress += 0.01 * level_speed
+        
+        # Completar un giro cuando el progreso llega a 1
+        if self.progress >= 1.0:
+            self.progress = 0.0
+            self.completed_turns += 1
+            self.check_level_completion()
+    
+    def check_level_completion(self):
+        """Verifica si se completó el nivel actual"""
+        required = LEVELS[self.current_level]['required_turns']
+        if self.completed_turns >= required:
+            if self.current_level < 3:
+                self.game_state = "level_complete"
+            else:
+                self.game_state = "game_complete"
+    
+    def advance_level(self):
+        """Avanza al siguiente nivel"""
+        if self.current_level < 3:
+            self.current_level += 1
+            self.completed_turns = 0
+            self.progress = 0.0
+            self.game_state = "playing"
+    
+    def on_draw(self):
+        """Dibuja la escena 3D"""
+        self.window.clear()
+        
+        # Configurar vista 3D
+        glClearColor(*COLOR_BG)
+        glEnable(GL_DEPTH_TEST)
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluPerspective(60, WINDOW_WIDTH/WINDOW_HEIGHT, 0.1, 100)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        gluLookAt(0, 0, 5, 0, 0, 0, 0, 1, 0)
+        
+        # Dibujar perno
+        glPushMatrix()
+        glTranslatef(0, 0, -3)
+        glColor4f(*COLOR_BOLT)
+        self.draw_cylinder(0.5, 2.0, 32)
+        self.draw_thread(0.55, 2.5, 0.2)
+        glPopMatrix()
+        
+        # Dibujar tuerca
+        glPushMatrix()
+        glTranslatef(*self.nut_position)
+        glRotatef(self.nut_rotation, 0, 0, 1)
+        glColor4f(*COLOR_NUT)
+        self.draw_hexagon(0.6, 0.4, 8)
+        glPopMatrix()
+        
+        # Dibujar HUD
+        self.draw_hud()
+    
+    def draw_cylinder(self, radius, height, slices):
+        """Dibuja un cilindro"""
+        quad = gluNewQuadric()
+        gluCylinder(quad, radius, radius, height, slices, 1)
+    
+    def draw_thread(self, radius, length, pitch):
+        """Dibuja la rosca del perno (hélice)"""
+        glBegin(GL_LINE_STRIP)
+        steps = 100
+        for i in range(steps):
+            angle = i * 2 * math.pi * 4  # 4 vueltas
+            z = i * length / steps
+            x = radius * math.cos(angle + z * pitch)
+            y = radius * math.sin(angle + z * pitch)
+            glVertex3f(x, y, z - length/2)
+        glEnd()
+    
+    def draw_hexagon(self, radius, height, sides):
+        """Dibuja una tuerca hexagonal"""
+        # Base inferior
+        glBegin(GL_POLYGON)
+        for i in range(sides):
+            angle = i * 2 * math.pi / sides
+            x = radius * math.cos(angle)
+            y = radius * math.sin(angle)
+            glVertex3f(x, y, -height/2)
+        glEnd()
+        
+        # Base superior
+        glBegin(GL_POLYGON)
+        for i in range(sides):
+            angle = i * 2 * math.pi / sides
+            x = radius * math.cos(angle)
+            y = radius * math.sin(angle)
+            glVertex3f(x, y, height/2)
+        glEnd()
+        
+        # Lados
+        glBegin(GL_QUAD_STRIP)
+        for i in range(sides + 1):
+            angle = i * 2 * math.pi / sides
+            x = radius * math.cos(angle)
+            y = radius * math.sin(angle)
+            glVertex3f(x, y, -height/2)
+            glVertex3f(x, y, height/2)
+        glEnd()
+    
+    def draw_hud(self):
+        """Dibuja la interfaz de usuario"""
+        # Cambiar a modo 2D
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluOrtho2D(0, WINDOW_WIDTH, 0, WINDOW_HEIGHT)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        glDisable(GL_DEPTH_TEST)
+        
+        # Mostrar información del nivel
+        level_text = f"Nivel: {self.current_level}/3"
+        label = pyglet.text.Label(level_text,
+                                font_size=20,
+                                x=20, y=WINDOW_HEIGHT-30,
+                                color=(255, 255, 255, 255))
+        label.draw()
+        
+        # Mostrar progreso
+        progress_text = f"Vueltas: {self.completed_turns}/{LEVELS[self.current_level]['required_turns']}"
+        label = pyglet.text.Label(progress_text,
+                                font_size=20,
+                                x=20, y=WINDOW_HEIGHT-60,
+                                color=(255, 255, 255, 255))
+        label.draw()
+        
+        # Barra de progreso
+        progress_width = 200 * (self.progress + self.completed_turns) / LEVELS[self.current_level]['required_turns']
+        glColor4f(0, 1, 0, 1)
+        glBegin(GL_QUADS)
+        glVertex2f(20, WINDOW_HEIGHT-90)
+        glVertex2f(20 + progress_width, WINDOW_HEIGHT-90)
+        glVertex2f(20 + progress_width, WINDOW_HEIGHT-80)
+        glVertex2f(20, WINDOW_HEIGHT-80)
+        glEnd()
+        
+        # Mensajes de estado
+        if self.game_state == "level_complete":
+            self.draw_centered_message("¡Nivel completado! Haz clic para continuar")
+        elif self.game_state == "game_complete":
+            self.draw_centered_message("¡Juego completado! Felicidades")
+    
+    def draw_centered_message(self, message):
+        """Dibuja un mensaje centrado en pantalla"""
+        label = pyglet.text.Label(message,
+                                font_size=36,
+                                x=WINDOW_WIDTH//2, y=WINDOW_HEIGHT//2,
+                                anchor_x='center', anchor_y='center',
+                                color=(255, 255, 0, 255))
+        label.draw()
+
+# Iniciar el juego
+if __name__ == "__main__":
+    print("Iniciando juego de motricidad con tuerca 3D...")
+    print("Instrucciones:")
+    print("1. Acerca tu mano a la cámara")
+    print("2. Junta pulgar e índice para agarrar la tuerca")
+    print("3. Mueve la mano para alinear la tuerca con el perno")
+    print("4. Gira la mano para enroscar la tuerca")
+    
+    game = NutAndBoltGame()
+    pyglet.app.run()
+    
+    # Liberar recursos
+    game.cap.release()
+    cv2.destroyAllWindows()

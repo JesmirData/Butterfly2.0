@@ -1,0 +1,264 @@
+import cv2
+import numpy as np
+import mediapipe as mp
+import random
+import time
+import pygame
+from pygame.locals import *
+
+# Inicializar pygame
+pygame.init()
+pygame.mixer.init()
+
+# Configuración de la pantalla
+WIDTH, HEIGHT = 900, 600
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Destruye las Figuras con tus Puños")
+
+# Colores
+BLACK = (0, 0, 0)
+WHITE = (255, 255, 255)
+RED = (255, 0, 0)
+GREEN = (0, 255, 0)
+BLUE = (0, 0, 255)
+YELLOW = (255, 255, 0)
+BRICK_COLOR = (139, 69, 19)  # Color ladrillo
+
+# Configuración de niveles
+LEVELS = {
+    1: {"figures": 10, "speed": 2, "spawn_rate": 1.5},
+    2: {"figures": 15, "speed": 3, "spawn_rate": 1.0},
+    3: {"figures": 20, "speed": 4, "spawn_rate": 0.7}
+}
+
+# Inicializar MediaPipe Hands
+mp_hands = mp.solutions.hands
+hands = mp_hands.Hands(max_num_hands=2, min_detection_confidence=0.7)
+mp_drawing = mp.solutions.drawing_utils
+
+# Inicializar cámara
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+# Clase para las figuras
+class Figure:
+    def __init__(self, x, y, speed):
+        self.x = x
+        self.y = y
+        self.speed = speed
+        self.size = random.randint(30, 60)
+        self.color = (random.randint(50, 255), random.randint(50, 255), random.randint(50, 255))
+        self.shape = random.choice(["circle", "square", "triangle"])
+        self.destroyed = False
+    
+    def update(self):
+        self.y += self.speed
+    
+    def draw(self, surface):
+        if not self.destroyed:
+            if self.shape == "circle":
+                pygame.draw.circle(surface, self.color, (int(self.x), int(self.y)), self.size)
+            elif self.shape == "square":
+                pygame.draw.rect(surface, self.color, (self.x - self.size, self.y - self.size, self.size*2, self.size*2))
+            else:  # triangle
+                points = [
+                    (self.x, self.y - self.size),
+                    (self.x - self.size, self.y + self.size),
+                    (self.x + self.size, self.y + self.size)
+                ]
+                pygame.draw.polygon(surface, self.color, points)
+    
+    def is_hit(self, x, y):
+        if self.destroyed:
+            return False
+        
+        if self.shape == "circle":
+            distance = ((self.x - x)**2 + (self.y - y)**2)**0.5
+            return distance <= self.size
+        elif self.shape == "square":
+            return (abs(self.x - x) <= self.size and abs(self.y - y) <= self.size)
+        else:  # triangle
+            # Simplificación para detección de triángulo
+            return (abs(self.x - x) <= self.size and abs(self.y - y) <= self.size)
+
+# Función para dibujar el marco de ladrillos
+def draw_brick_frame():
+    brick_width = 40
+    brick_height = 20
+    
+    # Ladrillos horizontales (arriba y abajo)
+    for x in range(0, WIDTH, brick_width):
+        pygame.draw.rect(screen, BRICK_COLOR, (x, 0, brick_width, brick_height))
+        pygame.draw.rect(screen, BRICK_COLOR, (x, HEIGHT - brick_height, brick_width, brick_height))
+    
+    # Ladrillos verticales (izquierda y derecha)
+    for y in range(0, HEIGHT, brick_height):
+        pygame.draw.rect(screen, BRICK_COLOR, (0, y, brick_width, brick_height))
+        pygame.draw.rect(screen, BRICK_COLOR, (WIDTH - brick_width, y, brick_width, brick_height))
+
+# Función para mostrar mensaje con temporizador
+def show_timed_message(message, duration=2.0):
+    screen.fill(BLACK)
+    text = font.render(message, True, WHITE)
+    screen.blit(text, (WIDTH//2 - text.get_width()//2, HEIGHT//2 - text.get_height()//2))
+    pygame.display.flip()
+    time.sleep(duration)
+
+# Función principal del juego
+def main():
+    global font
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont(None, 36)
+    
+    current_level = 1
+    figures = []
+    figures_destroyed = 0
+    figures_reached_bottom = 0
+    last_spawn_time = time.time()
+    game_active = True
+    level_complete = False
+    game_over = False
+    
+    try:
+        beep_sound = pygame.mixer.Sound("beep.wav")
+        level_complete_sound = pygame.mixer.Sound("level_complete.wav")
+        game_over_sound = pygame.mixer.Sound("game_over.wav")
+    except:
+        # Sonidos simulados si no existen los archivos
+        beep_sound = pygame.mixer.Sound(buffer=np.zeros(1000))
+        level_complete_sound = pygame.mixer.Sound(buffer=np.zeros(1000))
+        game_over_sound = pygame.mixer.Sound(buffer=np.zeros(1000))
+    
+    running = True
+    while running:
+        # Manejo de eventos
+        for event in pygame.event.get():
+            if event.type == QUIT:
+                running = False
+        
+        if not game_active:
+            # Transición automática entre niveles o reinicio
+            if level_complete:
+                if current_level < 3:
+                    show_timed_message(f"¡Nivel {current_level} completado! Pasando al siguiente nivel...")
+                    current_level += 1
+                else:
+                    show_timed_message("¡Juego completado! Reiniciando...")
+                    current_level = 1
+                
+                # Reiniciar variables del juego
+                figures = []
+                figures_destroyed = 0
+                figures_reached_bottom = 0
+                last_spawn_time = time.time()
+                game_active = True
+                level_complete = False
+                continue
+            
+            elif game_over:
+                show_timed_message("¡Perdiste! Reiniciando nivel...")
+                # Reiniciar variables del juego manteniendo el nivel actual
+                figures = []
+                figures_destroyed = 0
+                figures_reached_bottom = 0
+                last_spawn_time = time.time()
+                game_active = True
+                game_over = False
+                continue
+        
+        # Leer frame de la cámara
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        
+        # Procesar detección de manos
+        frame = cv2.flip(frame, 1)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = hands.process(frame_rgb)
+        
+        # Limpiar pantalla
+        screen.fill(BLACK)
+        draw_brick_frame()
+        
+        # Mostrar información
+        level_text = font.render(f"Nivel: {current_level}", True, WHITE)
+        destroyed_text = font.render(f"Destruidas: {figures_destroyed}/{LEVELS[current_level]['figures']}", True, WHITE)
+        danger_text = font.render(f"Falladas: {figures_reached_bottom}/3", True, RED if figures_reached_bottom > 0 else WHITE)
+        
+        screen.blit(level_text, (20, 20))
+        screen.blit(destroyed_text, (20, 60))
+        screen.blit(danger_text, (20, 100))
+        
+        # Generar nuevas figuras
+        current_time = time.time()
+        if (len(figures) < LEVELS[current_level]["figures"] and 
+            current_time - last_spawn_time > LEVELS[current_level]["spawn_rate"]):
+            x = random.randint(100, WIDTH - 100)
+            figures.append(Figure(x, -50, LEVELS[current_level]["speed"]))
+            last_spawn_time = current_time
+        
+        # Actualizar y dibujar figuras
+        fist_positions = []
+        
+        if results.multi_hand_landmarks:
+            for hand_landmarks in results.multi_hand_landmarks:
+                # Obtener posición del puño (aproximación)
+                wrist = hand_landmarks.landmark[0]
+                middle_finger_mcp = hand_landmarks.landmark[9]
+                
+                # Mapear coordenadas de la cámara a la pantalla del juego
+                x = int(wrist.x * WIDTH)
+                y = int(wrist.y * HEIGHT)
+                fist_positions.append((x, y))
+                
+                # Dibujar representación del puño en el juego
+                pygame.draw.circle(screen, GREEN, (x, y), 40, 2)
+        
+        # Actualizar figuras y verificar colisiones
+        for figure in figures[:]:
+            figure.update()
+            
+            # Verificar si llegó al fondo
+            if figure.y - figure.size > HEIGHT:
+                figures.remove(figure)
+                figures_reached_bottom += 1
+                
+                if figures_reached_bottom >= 3:
+                    game_over_sound.play()
+                    game_active = False
+                    game_over = True
+                continue
+            
+            # Verificar si fue golpeada
+            if not figure.destroyed:
+                for fist_x, fist_y in fist_positions:
+                    if figure.is_hit(fist_x, fist_y):
+                        figure.destroyed = True
+                        figures_destroyed += 1
+                        beep_sound.play()
+                        break
+            
+            figure.draw(screen)
+        
+        # Verificar si se completó el nivel
+        if figures_destroyed >= LEVELS[current_level]["figures"]:
+            level_complete_sound.play()
+            level_complete = True
+            game_active = False
+        
+        pygame.display.flip()
+        clock.tick(60)
+    
+    # Liberar recursos
+    cap.release()
+    cv2.destroyAllWindows()
+    pygame.quit()
+
+if __name__ == "__main__":
+    print("Instrucciones del juego:")
+    print("- Usa tus puños para destruir las figuras antes de que lleguen al fondo")
+    print("- Si 3 figuras llegan al fondo, pierdes")
+    print("- Completa todos los niveles para ganar")
+    print("- El juego pasa automáticamente entre niveles")
+    main()

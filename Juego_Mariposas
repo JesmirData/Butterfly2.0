@@ -1,0 +1,311 @@
+import cv2
+import mediapipe as mp
+import numpy as np
+import random
+import time
+from enum import Enum
+
+# Configuración del juego
+class Config:
+    ANCHO_VENTANA = 1000
+    ALTO_VENTANA = 700
+    COLOR_FONDO = (240, 240, 240)
+    COLOR_TEXTO = (50, 50, 50)
+    FUENTE = cv2.FONT_HERSHEY_SIMPLEX
+    DURACION_DESTELLO = 0.5  # segundos
+    MAX_MARIPOSAS = 10
+
+class NivelDificultad(Enum):
+    BASICO = {"velocidad": 1, "tamanio": 50, "frecuencia": 3, "mariposas_simultaneas": 3}
+    INTERMEDIO = {"velocidad": 1.5, "tamanio": 40, "frecuencia": 2, "mariposas_simultaneas": 6}
+    AVANZADO = {"velocidad": 2, "tamanio": 30, "frecuencia": 1, "mariposas_simultaneas": 10}
+
+class Mariposa:
+    def __init__(self, ancho_ventana, alto_ventana, tamanio, velocidad):
+        self.tamanio = tamanio
+        self.velocidad = velocidad
+        self.x = random.randint(tamanio, ancho_ventana - tamanio)
+        self.y = random.randint(tamanio, alto_ventana - tamanio)
+        self.direccion = random.uniform(0, 2 * np.pi)
+        self.color = (
+            random.randint(100, 255),
+            random.randint(100, 255),
+            random.randint(100, 255)
+        )
+        self.contador_animacion = 0
+        self.velocidad_animacion = random.uniform(0.1, 0.3)
+        self.activa = True
+        self.tiempo_destello = 0
+        self.destello_color = (0, 0, 0)
+        self.angulo_alas = 0
+        self.velocidad_alas = random.uniform(0.05, 0.15)
+
+    def actualizar(self, ancho_ventana, alto_ventana):
+        if not self.activa:
+            return
+
+        # Cambiar dirección aleatoriamente
+        if random.random() < 0.02:
+            self.direccion += random.uniform(-0.5, 0.5)
+
+        # Mover mariposa
+        self.x += np.cos(self.direccion) * self.velocidad
+        self.y += np.sin(self.direccion) * self.velocidad
+
+        # Rebotar en bordes
+        if self.x < self.tamanio or self.x > ancho_ventana - self.tamanio:
+            self.direccion = np.pi - self.direccion
+        if self.y < self.tamanio or self.y > alto_ventana - self.tamanio:
+            self.direccion = -self.direccion
+
+        # Animación de aleteo
+        self.contador_animacion += self.velocidad_animacion
+        self.angulo_alas = np.sin(self.contador_animacion) * np.pi/4
+
+    def dibujar(self, img):
+        if not self.activa:
+            # Mostrar destello si fue atrapada recientemente
+            if time.time() - self.tiempo_destello < Config.DURACION_DESTELLO:
+                cv2.circle(img, (int(self.x), int(self.y)), 
+                          int(self.tamanio * 1.5), self.destello_color, -1)
+            return
+
+        # Cuerpo de la mariposa
+        cv2.ellipse(img, (int(self.x), int(self.y)), 
+                   (int(self.tamanio/5), int(self.tamanio/3)), 
+                   0, 0, 360, (50, 50, 50), -1)
+
+        # Alas (con animación de aleteo)
+        for signo in [-1, 1]:
+            # Ala superior
+            pts_superior = []
+            for i in range(5):
+                ang = self.angulo_alas * signo + i * np.pi/8
+                pts_superior.append((
+                    int(self.x + np.cos(ang) * self.tamanio * 0.8),
+                    int(self.y + np.sin(ang) * self.tamanio * 0.6 * signo)
+                ))
+            cv2.fillPoly(img, [np.array(pts_superior)], self.color)
+
+            # Ala inferior
+            pts_inferior = []
+            for i in range(5):
+                ang = -self.angulo_alas * signo + i * np.pi/8 + np.pi/2
+                pts_inferior.append((
+                    int(self.x + np.cos(ang) * self.tamanio * 0.6),
+                    int(self.y + np.sin(ang) * self.tamanio * 0.8 * signo)
+                ))
+            cv2.fillPoly(img, [np.array(pts_inferior)], self.color)
+
+        # Detalles en las alas
+        cv2.circle(img, (int(self.x + self.tamanio*0.3), int(self.y)), 
+                  int(self.tamanio/6), (255, 255, 255), -1)
+        cv2.circle(img, (int(self.x - self.tamanio*0.3), int(self.y)), 
+                  int(self.tamanio/6), (255, 255, 255), -1)
+
+    def verificar_agarre(self, distancia_pulgar_indice, centro_pinza):
+        if not self.activa:
+            return False
+
+        distancia = np.sqrt((self.x - centro_pinza[0])**2 + (self.y - centro_pinza[1])**2)
+        if distancia < self.tamanio and distancia_pulgar_indice < self.tamanio:
+            self.activa = False
+            self.tiempo_destello = time.time()
+            self.destello_color = (
+                random.randint(200, 255),
+                random.randint(200, 255),
+                random.randint(200, 255)
+            )
+            return True
+        return False
+
+class JuegoMariposas:
+    def __init__(self):
+        self.cap = cv2.VideoCapture(0)
+        self.mp_manos = mp.solutions.hands
+        self.manos = self.mp_manos.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.5
+        )
+        self.mp_dibujo = mp.solutions.drawing_utils
+        self.nivel_actual = NivelDificultad.BASICO
+        self.puntuacion = 0
+        self.mariposas = []
+        self.ultima_mariposa_creada = 0
+        self.mariposas_atrapadas = 0
+        self.tiempo_inicio_nivel = time.time()
+        self.duracion_nivel = 60  # segundos
+        self.juego_activo = True
+        self.mensaje = ""
+        self.tiempo_mensaje = 0
+
+    def iniciar_nivel(self, nivel):
+        self.nivel_actual = nivel
+        self.mariposas = []
+        self.mariposas_atrapadas = 0
+        self.tiempo_inicio_nivel = time.time()
+        self.ultima_mariposa_creada = time.time()
+        self.juego_activo = True
+        self.mensaje = f"Nivel {nivel.name.capitalize()} - Atrapa las mariposas!"
+        self.tiempo_mensaje = time.time()
+
+    def crear_mariposas(self):
+        config = self.nivel_actual.value
+        tiempo_actual = time.time()
+        
+        # Crear nuevas mariposas según la frecuencia del nivel
+        if (tiempo_actual - self.ultima_mariposa_creada > config["frecuencia"] and
+            len([m for m in self.mariposas if m.activa]) < config["mariposas_simultaneas"] and
+            len(self.mariposas) < Config.MAX_MARIPOSAS):
+            
+            self.mariposas.append(
+                Mariposa(Config.ANCHO_VENTANA, Config.ALTO_VENTANA,
+                         config["tamanio"], config["velocidad"])
+            )
+            self.ultima_mariposa_creada = tiempo_actual
+
+    def actualizar_mariposas(self):
+        for mariposa in self.mariposas:
+            mariposa.actualizar(Config.ANCHO_VENTANA, Config.ALTO_VENTANA)
+
+        # Eliminar mariposas inactivas después del destello
+        self.mariposas = [
+            m for m in self.mariposas 
+            if m.activa or (time.time() - m.tiempo_destello < Config.DURACION_DESTELLO)
+        ]
+
+    def dibujar_mariposas(self, img):
+        for mariposa in self.mariposas:
+            mariposa.dibujar(img)
+
+    def detectar_pinza(self, landmarks, frame_shape):
+        if not landmarks:
+            return 0, (0, 0)
+
+        pulgar = landmarks.landmark[self.mp_manos.HandLandmark.THUMB_TIP]
+        indice = landmarks.landmark[self.mp_manos.HandLandmark.INDEX_FINGER_TIP]
+        
+        h, w = frame_shape[:2]
+        pulgar_x, pulgar_y = int(pulgar.x * w), int(pulgar.y * h)
+        indice_x, indice_y = int(indice.x * w), int(indice.y * h)
+        
+        distancia = np.sqrt((pulgar_x - indice_x)**2 + (pulgar_y - indice_y)**2)
+        centro = ((pulgar_x + indice_x)//2, (pulgar_y + indice_y)//2)
+        
+        return distancia, centro
+
+    def verificar_colisiones(self, distancia_pinza, centro_pinza):
+        if distancia_pinza == 0:  # No se detectó pinza
+            return
+
+        for mariposa in self.mariposas:
+            if mariposa.verificar_agarre(distancia_pinza, centro_pinza):
+                self.mariposas_atrapadas += 1
+                self.puntuacion += 10 * (self.nivel_actual.value["mariposas_simultaneas"] / 3)
+
+    def mostrar_info_juego(self, img):
+        # Mostrar puntuación y tiempo restante
+        tiempo_restante = max(0, self.duracion_nivel - (time.time() - self.tiempo_inicio_nivel))
+        cv2.putText(img, f"Puntuación: {self.puntuacion}", (20, 40), 
+                   Config.FUENTE, 0.8, Config.COLOR_TEXTO, 2)
+        cv2.putText(img, f"Tiempo: {int(tiempo_restante)}s", (20, 80), 
+                   Config.FUENTE, 0.8, Config.COLOR_TEXTO, 2)
+        cv2.putText(img, f"Mariposas: {self.mariposas_atrapadas}", (20, 120), 
+                   Config.FUENTE, 0.8, Config.COLOR_TEXTO, 2)
+        cv2.putText(img, f"Nivel: {self.nivel_actual.name.capitalize()}", (20, 160), 
+                   Config.FUENTE, 0.8, Config.COLOR_TEXTO, 2)
+
+        # Mostrar mensajes temporales
+        if time.time() - self.tiempo_mensaje < 3:
+            texto_size = cv2.getTextSize(self.mensaje, Config.FUENTE, 0.8, 2)[0]
+            texto_x = (Config.ANCHO_VENTANA - texto_size[0]) // 2
+            cv2.putText(img, self.mensaje, (texto_x, 40), 
+                       Config.FUENTE, 0.8, Config.COLOR_TEXTO, 2)
+
+    def verificar_fin_nivel(self):
+        tiempo_transcurrido = time.time() - self.tiempo_inicio_nivel
+        if tiempo_transcurrido > self.duracion_nivel:
+            self.juego_activo = False
+            if self.nivel_actual == NivelDificultad.BASICO:
+                self.mensaje = "¡Nivel Básico completado! Pasando a Intermedio..."
+                self.tiempo_mensaje = time.time()
+                self.iniciar_nivel(NivelDificultad.INTERMEDIO)
+            elif self.nivel_actual == NivelDificultad.INTERMEDIO:
+                self.mensaje = "¡Nivel Intermedio completado! Pasando a Avanzado..."
+                self.tiempo_mensaje = time.time()
+                self.iniciar_nivel(NivelDificultad.AVANZADO)
+            else:
+                self.mensaje = "¡Juego completado! Good Job!"
+                self.tiempo_mensaje = time.time()
+                return True
+        return False
+
+    def ejecutar(self):
+        self.iniciar_nivel(NivelDificultad.BASICO)
+
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+
+            frame = cv2.flip(frame, 1)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w = frame.shape[:2]
+
+            # Escalar el frame al tamaño de la ventana
+            frame = cv2.resize(frame, (Config.ANCHO_VENTANA, Config.ALTO_VENTANA))
+            img_juego = np.full((Config.ALTO_VENTANA, Config.ANCHO_VENTANA, 3), 
+                              Config.COLOR_FONDO, dtype=np.uint8)
+
+            # Procesar detección de manos
+            resultados = self.manos.process(frame_rgb)
+
+            if self.juego_activo:
+                # Lógica del juego
+                self.crear_mariposas()
+                self.actualizar_mariposas()
+                self.dibujar_mariposas(img_juego)
+
+                # Detectar gesto de pinza
+                distancia_pinza, centro_pinza = 0, (0, 0)
+                if resultados.multi_hand_landmarks:
+                    for mano_landmarks in resultados.multi_hand_landmarks:
+                        self.mp_dibujo.draw_landmarks(
+                            img_juego, mano_landmarks, self.mp_manos.HAND_CONNECTIONS)
+                        distancia_pinza, centro_pinza = self.detectar_pinza(mano_landmarks, img_juego.shape)
+
+                # Verificar si se atrapó una mariposa
+                self.verificar_colisiones(distancia_pinza, centro_pinza)
+
+                # Mostrar información del juego
+                self.mostrar_info_juego(img_juego)
+
+                # Verificar si terminó el nivel
+                if self.verificar_fin_nivel():
+                    self.juego_activo = False
+
+            # Mostrar mensaje final
+            if not self.juego_activo and time.time() - self.tiempo_mensaje < 5:
+                texto_size = cv2.getTextSize(self.mensaje, Config.FUENTE, 1, 2)[0]
+                texto_x = (Config.ANCHO_VENTANA - texto_size[0]) // 2
+                texto_y = (Config.ALTO_VENTANA + texto_size[1]) // 2
+                cv2.putText(img_juego, self.mensaje, (texto_x, texto_y), 
+                           Config.FUENTE, 1, (0, 100, 200), 2)
+
+            cv2.imshow("Terapia Visual con Mariposas", img_juego)
+
+            key = cv2.waitKey(1)
+            if key == ord('q'):
+                break
+            elif key == ord('r'):
+                self.iniciar_nivel(NivelDificultad.BASICO)
+                self.puntuacion = 0
+
+        self.cap.release()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    juego = JuegoMariposas()
+    juego.ejecutar()

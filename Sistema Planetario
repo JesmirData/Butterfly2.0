@@ -1,0 +1,26 @@
+import turtle
+import math
+
+pantalla = turtle.Screen()
+pantalla.bgcolor("blue")
+pantalla.title("Mini Sistema Planetario")
+
+sol = turtle.Turtle()
+sol.shape("circle")
+sol.color("yellow")
+sol.shapesize(2)
+
+planeta = turtle.Turtle()
+planeta.shape("circle")
+planeta.color("white")
+planeta.penup()
+
+radio_orbita = 120
+angulo = 0
+
+while True:
+    x = radio_orbita * math.cos(math.radians(angulo))
+    y = radio_orbita * math.sin(math.radians(angulo))
+    planeta.goto(x,y)
+    angulo += 2
+
